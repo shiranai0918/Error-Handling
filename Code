@@ -1,51 +1,41 @@
-// Register
-router.post('/register', isNotAuthenticated, async (req, res) => {
-    const { username, email, password, confirmPassword } = req.body;
+   // ERROR HANDLING: 15-SECOND LOCKOUT
+    if (!req.session.loginAttempts) req.session.loginAttempts = 0;
 
-    // Basic check
-    if (!username || !email || !password || !confirmPassword) {
-        return res.render('register', { error: 'All fields are required' });
+    if (req.session.loginAttempts >= 5) {
+        const timePassed = Date.now() - (req.session.lastAttemptTime || 0);
+        if (timePassed < 15000) {
+            const remaining = Math.ceil((15000 - timePassed) / 1000);
+            return res.render(template, {
+                error: `Too many attempts. Please wait ${remaining} seconds.`,
+                email: email || '',
+                password: password || '',
+                showVerificationInput: !!verification_code
+            });
+        } else {
+            req.session.loginAttempts = 0; // Reset after wait time
+        }
     }
 
-    // Email domain check (@gmail.com only)
-    if (!email.endsWith('@gmail.com')) {
-        return res.render('register', { error: 'Only @gmail.com addresses are allowed' });
-    }
-
-    // Password Strength check (Regex)
-    const passwordRegex = /^(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()_+])[A-Za-z\d!@#$%^&*()_+]{8,}$/;
-    if (!passwordRegex.test(password)) {
-        return res.render('register', {
-            error: 'Password too weak! Requires 1 uppercase, 1 number, and 1 special character.'
-        });
-    }
-
-    // Match check
-    if (password !== confirmPassword) {
-        return res.render('register', { error: 'Passwords do not match' });
+    if (!email || !password) {
+        return res.render(template, { error: 'All fields required', email: email || '', password: password || '', showVerificationInput: false });
     }
 
     let connection;
     try {
         connection = await pool.getConnection();
+        const [users] = await connection.query('SELECT * FROM users WHERE email = ? AND role = ?', [email, role]);
 
-        const [existing] = await connection.query('SELECT * FROM users WHERE email = ?', [email]);
-        if (existing.length > 0) {
-            return res.render('register', { error: 'Email already registered' });
+        if (users.length === 0) {
+            req.session.loginAttempts++;
+            req.session.lastAttemptTime = Date.now();
+            return res.render(template, { error: 'Invalid email or password', email, password: '', showVerificationInput: false });
         }
 
-        const hashedPassword = await bcrypt.hash(password, 10);
-        await connection.query(
-            'INSERT INTO users (username, email, password, role, is_verified) VALUES (?, ?, ?, ?, ?)',
-            [username, email, hashedPassword, 'user', 0]
-        );
+        const user = users[0];
+        const valid = await bcrypt.compare(password, user.password);
 
-        res.redirect('/auth/user-login');
-
-    } catch (err) {
-        console.error('Registration Error:', err);
-        res.render('register', { error: 'A server error occurred' });
-    } finally {
-        if (connection) connection.release();
-    }
-});
+        if (!valid) {
+            req.session.loginAttempts++;
+            req.session.lastAttemptTime = Date.now();
+            return res.render(template, { error: 'Invalid email or password', email, password: '', showVerificationInput: false });
+        }
